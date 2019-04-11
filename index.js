@@ -1,4 +1,7 @@
-const modules = require('./modules')
+const { config, persist } = require('internal')
+const pUrl = require('url')
+const needle = require('needle')
+const cheerio = require('cheerio')
 
 const defaults = {
 	name: 'IPTV Web Player - Channels',
@@ -30,7 +33,7 @@ function setEndpoint(str) {
 		if (!host.endsWith('/'))
 			host += '/'
 		endpoint = host
-		origin = !modules.get.url ? defaults.origin : endpoint.replace(modules.get.url.parse(endpoint).path, '')
+		origin = endpoint.replace(pUrl.parse(endpoint).path, '')
 		ajaxEndpoint = endpoint + 'includes/ajax-control.php'
 		headers['Origin'] = origin
 		headers['Referer'] = endpoint + 'index.php'
@@ -52,7 +55,7 @@ let loggedIn = false
 // not using logout anywhere yet
 function logout(cb) {
 	const payload = 'action=logoutProcess'
-	modules.get.needle.post(ajaxEndpoint, payload, { headers, cookies }, (err, resp, body) => {
+	needle.post(ajaxEndpoint, payload, { headers, cookies }, (err, resp, body) => {
 		if (!err) {
 			loggedIn = false
 			cookies = undefined
@@ -62,13 +65,13 @@ function logout(cb) {
 	})
 }
 
-function isLogedIn(local, cb) {
+setEndpoint(config.host)
+
+function isLogedIn(cb) {
 	if (loggedIn)
 		return cb(true)
-	const config = local.config
-	setEndpoint(config.host)
 	const payload = 'action=webtvlogin&uname='+config.username+'&upass='+config.password+'&rememberMe=off'
-	modules.get.needle.post(ajaxEndpoint, payload, { headers, cookies }, (err, resp, body) => {
+	needle.post(ajaxEndpoint, payload, { headers, cookies }, (err, resp, body) => {
 		cookies = resp.cookies
 		if (body) {
 			if (typeof body == 'string') {
@@ -92,8 +95,8 @@ function isLogedIn(local, cb) {
 					// login success
 					loggedIn = true
 					console.log(defaults.name + ' - Logged In')
-					local.persist.loginData = msg
-					getCategories(local, success => {
+					persist.setItem('loginData', msg)
+					getCategories(success => {
 						if (success)
 							console.log(defaults.name + ' - Updated catalogs successfully')
 						else
@@ -115,22 +118,19 @@ function isLogedIn(local, cb) {
 	})
 }
 
-function request(local, url, payload, cb) {
-	isLogedIn(local, () => { modules.get.needle.post(url, payload, { headers, cookies }, cb) })
+function request(url, payload, cb) {
+	isLogedIn(() => { needle.post(url, payload, { headers, cookies }, cb) })
 }
 
-function getVideos(local, reqId, cb) {
-	const config = local.config
-	setEndpoint(config.host)
+function getVideos(reqId, cb) {
 	const id = reqId.replace(defaults.prefix + 'meta_', '')
 	if (channels[id] && channels[id].length)
 		cb(channels[id])
 	else {
-		const persist = local.persist
-		const payload = 'action=getStreamsFromID&categoryID=' + id + '&hostURL=' + encodeURIComponent('http://' + persist.loginData.url + ':' + persist.loginData.port + '/')
-		request(local, ajaxEndpoint, payload, (err, resp, body) => {
+		const payload = 'action=getStreamsFromID&categoryID=' + id + '&hostURL=' + encodeURIComponent('http://' + persist.getItem('loginData').url + ':' + persist.getItem('loginData').port + '/')
+		request(ajaxEndpoint, payload, (err, resp, body) => {
 			if (!err && body) {
-				const $ = modules.get.cheerio.load(body)
+				const $ = cheerio.load(body)
 				channels[id] = []
 
 				$('li.streamList').each((ij, el) => {
@@ -155,14 +155,12 @@ function addZero(deg) {
 	return ('0' + deg).slice(-2)
 }
 
-function getCategories(local, cb) {
-	const config = local.config
-	setEndpoint(config.host)
+function getCategories(cb) {
 	const date = new Date()
 	const payload = 'dateFullData=' + (date.getDay() +1) + '-' + (date.getMonth() +1) + '-' + date.getFullYear() + '+' + encodeURIComponent(addZero(date.getHours()) + ":" + addZero(date.getMinutes()) + ":" + addZero(date.getSeconds()))
-	modules.get.needle.post(endpoint + 'live.php', payload, { headers, cookies }, (err, resp, body) => {
+	needle.post(endpoint + 'live.php', payload, { headers, cookies }, (err, resp, body) => {
 		if (!err && body) {
-			const $ = modules.get.cheerio.load(body)
+			const $ = cheerio.load(body)
 			const results = []
 			$('.cbp-spmenu li a').each((ij, el) => {
 				const elm = $(el)
@@ -183,77 +181,84 @@ function getCategories(local, cb) {
 	})
 }
 
-module.exports = {
-	manifest: local => {
-		modules.set(local.modules)
-		const config = local.config
-
-		function manifest() {
-			return {
-				id: 'org.' + defaults.name.toLowerCase().replace(/[^a-z]+/g,''),
-				version: '1.0.0',
-				name: defaults.name,
-				description: 'Creates channels based on IPTV Web Portals. Connects to the Web Portal used by many IPTV Providers (Nitro, Beast, Twisted and many more)',
-				resources: ['stream', 'meta', 'catalog'],
-				types: ['tv', 'channel'],
-				idPrefixes: [defaults.prefix],
-				icon: defaults.icon,
-				catalogs: [
-					{
-						id: defaults.prefix + 'catalog',
-						name: 'Web Portal IPTV',
-						type: 'tv',
-						extra: [{ name: 'search' }]
-					}
-				]
-			}
+function retrieveManifest() {
+	function manifest() {
+		return {
+			id: 'org.' + defaults.name.toLowerCase().replace(/[^a-z]+/g,''),
+			version: '1.0.0',
+			name: defaults.name,
+			description: 'Creates channels based on IPTV Web Portals. Connects to the Web Portal used by many IPTV Providers (Nitro, Beast, Twisted and many more)',
+			resources: ['stream', 'meta', 'catalog'],
+			types: ['tv', 'channel'],
+			idPrefixes: [defaults.prefix],
+			icon: defaults.icon,
+			catalogs: [
+				{
+					id: defaults.prefix + 'catalog',
+					name: 'Web Portal IPTV',
+					type: 'tv'
+				}
+			]
 		}
-
-		return new Promise((resolve, reject) => {
-			isLogedIn(local, () => { resolve(manifest()) })
-		})
-	},
-	handler: (args, local) => {
-		modules.set(local.modules)
-		const persist = local.persist
-		const config = local.config
-		const extra = args.extra || {}
-
-	    if (!args.id)
-	        return Promise.reject(new Error(defaults.name + ' - No ID Specified'))
-
-		return new Promise((resolve, reject) => {
-
-			if (args.resource == 'catalog') {
-				isLogedIn(local, () => {
-					if (categories.length)
-						resolve({ metas: categories })
-					else
-						reject(defaults.name + ' - Invalid catalog response')
-				})
-			} else if (args.resource == 'meta') {
-				
-				let meta
-
-				categories.forEach(el => {
-					if (el.id == args.id) {
-						meta = el
-						return true
-					}
-				})
-				if (!meta)
-					reject(defaults.name + ' - Could not find meta')
-				else
-					getVideos(local, args.id, videos => {
-						if (videos.length)
-							meta.videos = videos
-						resolve({ meta })
-					})
-			} else if (args.resource == 'stream') {
-				const chanId = args.id.split('_')[2]
-				const url = 'http://' + persist.loginData.url + ':' + persist.loginData.port + '/live/' + config.username + '/' + config.password + '/' + chanId + '.m3u8'
-				resolve({ streams: [ { title: 'Stream', url } ] })
-			}
-		})
 	}
+
+	return new Promise((resolve, reject) => {
+		isLogedIn(() => { resolve(manifest()) })
+	})
 }
+
+async function retrieveRouter() {
+	const manifest = await retrieveManifest()
+
+	const { addonBuilder, getInterface, getRouter } = require('stremio-addon-sdk')
+
+	const builder = new addonBuilder(manifest)
+
+	builder.defineCatalogHandler(args => {
+		return new Promise((resolve, reject) => {
+			isLogedIn(() => {
+				if (categories.length)
+					resolve({ metas: categories })
+				else
+					reject(defaults.name + ' - Invalid catalog response')
+			})
+		})
+	})
+
+	builder.defineMetaHandler(args => {
+		return new Promise((resolve, reject) => {
+			let meta
+
+			categories.forEach(el => {
+				if (el.id == args.id) {
+					meta = el
+					return true
+				}
+			})
+			if (!meta)
+				reject(defaults.name + ' - Could not find meta')
+			else
+				getVideos(args.id, videos => {
+					if (videos.length)
+						meta.videos = videos
+					resolve({ meta })
+				})
+		})
+	})
+
+	builder.defineStreamHandler(args => {
+		return new Promise((resolve, reject) => {
+			const chanId = args.id.split('_')[2]
+			const url = 'http://' + persist.getItem('loginData').url + ':' + persist.getItem('loginData').port + '/live/' + config.username + '/' + config.password + '/' + chanId + '.m3u8'
+			resolve({ streams: [ { title: 'Stream', url } ] })
+		})
+	})
+
+	const addonInterface = getInterface(builder)
+
+	return getRouter(addonInterface)
+
+}
+
+module.exports = retrieveRouter()
+
